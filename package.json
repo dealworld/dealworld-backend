@@ -1,0 +1,27 @@
+{
+  "name": "dealworld-backend",
+  "version": "0.1.0",
+  "description": "Backend service for DealWorld 2.0 — a CRM for a business brokerage",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "migrate": "node src/migrate.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "pg": "^8.12.0",
+    "dotenv": "^16.4.5",
+    "googleapis": "^140.0.0",
+    "node-cron": "^3.0.3",
+    "twilio": "^5.2.2",
+    "axios": "^1.7.2",
+    "@anthropic-ai/sdk": "^0.27.0",
+    "body-parser": "^1.20.2",
+    "multer": "^1.4.5-lts.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
+  }
+}
