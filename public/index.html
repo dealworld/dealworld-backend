@@ -159,15 +159,104 @@
 (function(){
 
 /* ---------------- DATA LAYER ---------------- */
-const STORE_KEY = "dealworld-v1";
 let state = {
   leads: [],
   listings: [],
   contacts: [],
   provisors: [],
   newsletters: [],
+  tasks: [], // every lead/contact task, flat — kept in sync so dashboard/pipeline/tasks views don't need each lead's detail loaded
   loaded: false
 };
+
+/* ---- API client ---- */
+async function api(method, path, body){
+  const res = await fetch("/api" + path, {
+    method,
+    credentials: "same-origin",
+    headers: body ? { "Content-Type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined
+  });
+  if(res.status === 401){
+    let msg = "not authenticated";
+    try{ msg = (await res.json()).error || msg; }catch(e){}
+    // Callers on the login/setup screen handle this themselves (wrong password, etc).
+    // Anywhere else, a 401 means the session died mid-use — drop back to the login screen.
+    if(authed){ authed = false; render(); }
+    throw new Error(msg);
+  }
+  if(!res.ok){
+    let msg = res.statusText;
+    try{ msg = (await res.json()).error || msg; }catch(e){}
+    alert("Something went wrong talking to the server: " + msg);
+    throw new Error(msg);
+  }
+  if(res.status === 204) return null;
+  return res.json();
+}
+const apiGet = (path)=> api("GET", path);
+const apiPost = (path, body)=> api("POST", path, body);
+const apiPatch = (path, body)=> api("PATCH", path, body);
+const apiDelete = (path)=> api("DELETE", path);
+
+function d(dateVal){ return dateVal ? String(dateVal).slice(0,10) : ""; }
+
+/* ---- Server row -> frontend shape adapters ---- */
+function normalizeNote(row){
+  return { id: row.id, text: row.body, author: row.author || "Max", ts: d(row.created_at) };
+}
+function normalizeTask(row){
+  return { id: row.id, title: row.title, due: d(row.due_date), status: row.status, assignee: row.assignee || "Max",
+    leadName: row.lead_name, recordType: row.record_type, recordId: row.record_id };
+}
+function leadOpenTaskCount(leadId){
+  return state.tasks.filter(t=>t.recordType==="lead" && t.recordId===leadId && t.status==="open").length;
+}
+function normalizeLead(row){
+  return {
+    id: row.id, name: row.name, email: row.email || "", phone: row.phone || "",
+    type: row.type, source: row.source || "", listingRef: row.listing_ref || "", listingId: row.listing_id || "",
+    stage: row.stage, outcome: row.outcome || null, owner: row.owner || "Max",
+    lastContactAt: d(row.last_contact_at), createdAt: d(row.created_at), description: row.description || "",
+    notes: (row.notes || []).map(normalizeNote),
+    tasks: (row.tasks || []).map(normalizeTask),
+    documents: row.documents || []
+  };
+}
+function normalizeListing(row){
+  return {
+    id: row.id, businessName: row.business_name, industry: row.industry || "", askingPrice: row.asking_price || "",
+    status: row.status, sellerLeadId: row.seller_lead_id || "", notes: row.notes || "", createdAt: d(row.created_at),
+    links: (row.links || []).map(l=>({ id: l.id, label: l.label, url: l.url }))
+  };
+}
+function normalizeContact(row){
+  return {
+    id: row.id, name: row.name, email: row.email || "", phone: row.phone || "", details: row.details || "",
+    linkedin: row.linkedin || "", category: row.category || "General", tags: [row.category || "General"],
+    photoDataUrl: row.photo_url || "", createdAt: d(row.created_at),
+    notes: (row.notes || []).map(normalizeNote), tasks: (row.tasks || []).map(normalizeTask)
+  };
+}
+function normalizeProvisor(row){
+  return {
+    id: row.id, name: row.name, email: row.email || "", phone: row.phone || "", specialty: row.specialty || "",
+    tags: row.tags || [], photoDataUrl: row.photo_url || "",
+    troikaCount: row.troika_count !== undefined ? Number(row.troika_count) : (row.troikas || []).length,
+    connectionCount: row.connection_count !== undefined ? Number(row.connection_count) : (row.connections || []).length,
+    commentCount: row.comment_count !== undefined ? Number(row.comment_count) : (row.comments || []).length,
+    troikas: (row.troikas || []).map(t=>({ id: t.id, date: d(t.event_date), notes: t.notes })),
+    connections: (row.connections || []).map(c=>({ id: c.id, date: d(c.event_date), direction: c.direction, note: c.note, linkedLeadId: c.linked_lead_id || "" })),
+    comments: (row.comments || []).map(normalizeNote)
+  };
+}
+function normalizeNewsletter(row){
+  const opt = recipientOptions().find(g=>g.key===row.recipient_group);
+  return {
+    id: row.id, subject: row.subject || "", body: row.body || "", recipientKey: row.recipient_group,
+    recipientLabel: opt ? opt.label : (row.recipient_group || "—"), status: row.status, createdAt: d(row.created_at)
+  };
+}
 
 function md5(string) {
   function rotateLeft(x, c) { return (x << c) | (x >>> (32 - c)); }
@@ -262,7 +351,6 @@ function renderAvatar(photoDataUrl, email){
   return `<div class="avatar"></div>`;
 }
 
-function uid(){ return Math.random().toString(36).slice(2,10); }
 function today(){ return new Date().toISOString().slice(0,10); }
 function daysSince(dateStr){
   if(!dateStr) return 9999;
@@ -272,65 +360,42 @@ function fmtDate(d){ if(!d) return "—"; return d; }
 
 async function loadState(){
   try{
-    const res = await window.storage.get(STORE_KEY, false);
-    if(res && res.value){
-      const parsed = JSON.parse(res.value);
-      state = Object.assign(state, parsed);
-    } else {
-      seedDemoData();
-      await saveState();
-    }
+    const [leads, listings, contacts, provisors, newsletters, tasks] = await Promise.all([
+      apiGet("/leads"), apiGet("/listings"), apiGet("/contacts"), apiGet("/provisors"), apiGet("/newsletters"), apiGet("/tasks")
+    ]);
+    state.leads = leads.map(normalizeLead);
+    state.listings = listings.map(normalizeListing);
+    state.contacts = contacts.map(normalizeContact);
+    state.provisors = provisors.map(normalizeProvisor);
+    state.newsletters = newsletters.map(normalizeNewsletter);
+    state.tasks = tasks.map(normalizeTask);
   }catch(e){
-    seedDemoData();
+    console.error("Failed to load from server", e);
   }
   state.loaded = true;
 }
 
-let saveTimer = null;
-function saveState(){
-  return new Promise((resolve)=>{
-    clearTimeout(saveTimer);
-    saveTimer = setTimeout(async ()=>{
-      try{
-        await window.storage.set(STORE_KEY, JSON.stringify({
-          leads: state.leads, listings: state.listings, contacts: state.contacts, provisors: state.provisors, newsletters: state.newsletters
-        }), false);
-      }catch(e){ console.error("Storage error", e); }
-      resolve();
-    }, 150);
-  });
+// These fetch the single-record detail endpoint (notes/tasks/links/etc. included)
+// and merge it into the already-loaded list item, since the list endpoints are shallow.
+async function loadLeadDetail(id){
+  const row = await apiGet(`/leads/${id}`);
+  const idx = state.leads.findIndex(x=>x.id===id);
+  if(idx>-1) state.leads[idx] = normalizeLead(row);
 }
-
-function seedDemoData(){
-  state.listings = [
-    {id: uid(), businessName:"Explosive Growth Home Care Agency", industry:"Home Care / Healthcare Services", askingPrice:"$1,250,000", status:"Active", sellerLeadId:"", notes:"Turnkey, AI driven ops. BizBuySell Ref 60373-224470.", createdAt: today(),
-      links:[{id:uid(), label:"BizBuySell listing", url:"https://www.bizbuysell.com/"}]}
-  ];
-  state.leads = [
-    {
-      id: uid(), name: "Alem Jones", email: "alembeyene2010@gmail.com", phone: "(510) 459-2936",
-      type: "buyer", source: "BizBuySell", listingRef: "Explosive Growth Home Care Agency — Turnkey & AI Driven Ops (Ref 60373-224470)",
-      listingId: state.listings[0].id,
-      stage: "New Lead", owner: "Max", lastContactAt: today(), createdAt: today(),
-      notes: [{id:uid(), text:"Sample lead pulled in from the BizBuySell notification you forwarded. Real inbound leads will land here automatically once Gmail parsing is connected.", author:"System", ts: today()}],
-      description: "Able to invest: not disclosed on the original inquiry. Purchase timeline: not disclosed.",
-      tasks: [{id:uid(), title:"Send NDA and respond within 3 business days", due: today(), status:"open", assignee:"Max"}],
-      documents: []
-    }
-  ];
-  state.contacts = [
-    {id: uid(), name:"Dana Whitfield", email:"dana@whitfieldlaw.com", phone:"(213) 555-0142", details:"Closing attorney, handles our purchase agreements", category:"Attorney", tags:["Attorney"], photoDataUrl:"", linkedin:"", createdAt: today(),
-      notes:[{id:uid(), text:"Handled the closing on the Riverside Auto Body deal, quick turnaround.", author:"Max", ts: today()}],
-      tasks:[{id:uid(), title:"Send her the draft APA for review", due: today(), status:"open", assignee:"Max"}]}
-  ];
-  state.provisors = [
-    {id: uid(), name:"Marcus Delgado", email:"marcus@sbalending.com", phone:"(714) 555-0110", specialty:"SBA Lender", tags:["Lender"], photoDataUrl:"",
-      troikas:[{id:uid(), date: today(), notes:"Monthly troika, discussed two active buyers needing financing"}],
-      connections:[{id:uid(), date: today(), direction:"Sent", note:"Introduced to a buyer on the Home Care Agency listing", linkedLeadId:""}],
-      comments:[{id:uid(), text:"Fast turnaround on pre-qual letters, good first call for financing questions.", author:"Max", ts: today()}]
-    }
-  ];
-  state.newsletters = [];
+async function loadContactDetail(id){
+  const row = await apiGet(`/contacts/${id}`);
+  const idx = state.contacts.findIndex(x=>x.id===id);
+  if(idx>-1) state.contacts[idx] = normalizeContact(row);
+}
+async function loadProvisorDetail(id){
+  const row = await apiGet(`/provisors/${id}`);
+  const idx = state.provisors.findIndex(x=>x.id===id);
+  if(idx>-1) state.provisors[idx] = normalizeProvisor(row);
+}
+async function loadListingDetail(id){
+  const row = await apiGet(`/listings/${id}`);
+  const idx = state.listings.findIndex(x=>x.id===id);
+  if(idx>-1) state.listings[idx] = normalizeListing(row);
 }
 
 /* ---------------- STAGES ---------------- */
@@ -338,6 +403,15 @@ const BUYER_STAGES = ["New Lead","NDA Sent","NDA Signed","CIM Sent","Reviewing C
 const SELLER_STAGES = ["New Lead","Marketing Agmt Sent","Marketing Agmt Signed","Listing Live","Offer Received","Under Contract","Due Diligence","Closing","Closed"];
 
 function stagesFor(type){ return type === "seller" ? SELLER_STAGES : BUYER_STAGES; }
+
+/* ---------------- AUTH STATE ---------------- */
+let authChecked = false; // has the initial /auth/status + /auth/me round trip finished?
+let hasAccount = null;   // does an account exist at all (false => show the one-time setup screen)?
+let authed = false;      // is there currently a valid session?
+let authEmail = null;
+let authError = null;    // error text shown on the login/setup form
+let settingsError = null;
+let settingsSaved = false;
 
 /* ---------------- VIEW STATE ---------------- */
 let view = "dashboard";
@@ -406,38 +480,32 @@ function autoMapHeaders(headers, fields){
   return mapping;
 }
 
+// Builds a payload shaped for the backend's /import/* routes (snake_case, no client-only fields).
 function buildRecordFromRow(module, row, mapping){
   const get = (key)=> mapping[key] ? String(row[mapping[key]] ?? "").trim() : "";
   if(module==="leads-buyer" || module==="leads-seller"){
-    const type = module==="leads-buyer" ? "buyer" : "seller";
     return {
-      id: uid(), name: get("name"), email: get("email"), phone: get("phone"), type,
-      source: get("source") || "CSV/Excel import", listingRef: get("listingRef"), listingId: "",
-      description: get("description"),
-      stage: "New Lead", owner: "Max", lastContactAt: today(), createdAt: today(),
-      notes: [], tasks: [], documents: []
+      name: get("name"), email: get("email"), phone: get("phone"),
+      source: get("source") || "CSV/Excel import", listing_ref: get("listingRef"),
+      description: get("description")
     };
   }
   if(module==="listings"){
-    return { id: uid(), businessName: get("businessName"), industry: get("industry"), askingPrice: get("askingPrice"),
-      status: get("status") || "Active", notes: get("notes"), sellerLeadId: "", createdAt: today(), links: [] };
+    return { business_name: get("businessName"), industry: get("industry"), asking_price: get("askingPrice"),
+      status: get("status") || "Active", notes: get("notes") };
   }
   if(module==="contacts"){
     const details = get("details");
-    return { id: uid(), name: get("name"), email: get("email"), phone: get("phone"), details,
-      linkedin: get("linkedin"),
-      category: autoCategory(details), tags:[autoCategory(details)], photoDataUrl:"", createdAt: today(),
-      notes: [], tasks: [] };
+    return { name: get("name"), email: get("email"), phone: get("phone"), details,
+      linkedin: get("linkedin"), category: autoCategory(details) };
   }
   if(module==="provisors"){
-    const specialty = get("specialty") || "Other";
-    return { id: uid(), name: get("name"), email: get("email"), phone: get("phone"), specialty, tags:[specialty],
-      photoDataUrl:"", troikas:[], connections:[], comments:[] };
+    return { name: get("name"), email: get("email"), phone: get("phone"), specialty: get("specialty") || "Other" };
   }
 }
 
 function recordHasAName(module, rec){
-  return module==="listings" ? !!rec.businessName : !!rec.name;
+  return module==="listings" ? !!rec.business_name : !!rec.name;
 }
 let showAddContact = false;
 let showAddProvisor = false;
@@ -446,6 +514,9 @@ let showNewsletterEditor = null; // newsletter object being edited, or null
 const root = document.getElementById("app");
 
 function render(){
+  if(!authChecked){ root.innerHTML = `<div style="padding:40px;color:var(--muted)">Loading DealWorld 2.0…</div>`; return; }
+  if(!hasAccount){ root.innerHTML = renderAuthShell(renderSetupForm()); bindEvents(); return; }
+  if(!authed){ root.innerHTML = renderAuthShell(renderLoginForm()); bindEvents(); return; }
   if(!state.loaded){ root.innerHTML = `<div style="padding:40px;color:var(--muted)">Loading DealWorld 2.0…</div>`; return; }
   root.innerHTML = `
     ${renderTopbar()}
@@ -464,6 +535,58 @@ function render(){
   bindEvents();
 }
 
+/* ---------------- AUTH SCREENS ---------------- */
+function renderAuthShell(innerHtml){
+  return `
+  <div style="min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px">
+    <div style="width:380px;max-width:100%">
+      <div style="text-align:center;margin-bottom:22px">
+        <div style="font-family:var(--serif);font-size:26px;color:var(--ink)">Deal<b style="color:var(--brass);font-weight:700">World</b> 2.0</div>
+        <div style="color:var(--muted);font-family:var(--mono);font-size:11px;letter-spacing:1px;text-transform:uppercase">Business Brokerage CRM</div>
+      </div>
+      <div class="panel" style="margin-bottom:0">${innerHtml}</div>
+    </div>
+  </div>`;
+}
+
+function renderSetupForm(){
+  return `
+    <h1 class="page-title" style="font-size:19px">Create your account</h1>
+    <p class="page-sub">This is a single-user login — set it up once and you'll log in with it from now on.</p>
+    ${authError ? `<div class="pill late" style="display:block;margin-bottom:14px;padding:8px 10px">${authError}</div>` : ""}
+    <div class="field"><label>Email</label><input id="setup-email" type="email" autocomplete="username"></div>
+    <div class="field"><label>Password</label><input id="setup-password" type="password" autocomplete="new-password"></div>
+    <div class="field"><label>Confirm password</label><input id="setup-password-confirm" type="password" autocomplete="new-password"></div>
+    <button class="btn primary" id="btn-setup-submit" style="width:100%">Create account</button>
+  `;
+}
+
+function renderLoginForm(){
+  return `
+    <h1 class="page-title" style="font-size:19px">Log in</h1>
+    ${authError ? `<div class="pill late" style="display:block;margin-bottom:14px;padding:8px 10px">${authError}</div>` : ""}
+    <div class="field"><label>Email</label><input id="login-email" type="email" autocomplete="username"></div>
+    <div class="field"><label>Password</label><input id="login-password" type="password" autocomplete="current-password"></div>
+    <button class="btn primary" id="btn-login-submit" style="width:100%">Log in</button>
+  `;
+}
+
+function renderAccountSettings(){
+  return `
+    <h1 class="page-title">Account Settings</h1>
+    <p class="page-sub">Signed in as ${authEmail}</p>
+    <div class="panel" style="max-width:440px">
+      ${settingsError ? `<div class="pill late" style="display:block;margin-bottom:14px;padding:8px 10px">${settingsError}</div>` : ""}
+      ${settingsSaved ? `<div class="pill" style="display:block;margin-bottom:14px;padding:8px 10px;color:var(--green);border-color:var(--green)">Saved.</div>` : ""}
+      <div class="field"><label>New email <span style="text-transform:none">(leave blank to keep the current one)</span></label><input id="settings-email" type="email" value="${authEmail}"></div>
+      <div class="field"><label>New password <span style="text-transform:none">(leave blank to keep the current one)</span></label><input id="settings-new-password" type="password" autocomplete="new-password"></div>
+      <div class="field"><label>Confirm new password</label><input id="settings-new-password-confirm" type="password" autocomplete="new-password"></div>
+      <div class="field"><label>Current password <span style="text-transform:none">(required to save any change)</span></label><input id="settings-current-password" type="password" autocomplete="current-password"></div>
+      <button class="btn primary" id="btn-settings-save">Save changes</button>
+    </div>
+  `;
+}
+
 function renderTopbar(){
   const tabs = [["dashboard","Dashboard"],["pipeline","Pipeline"],["listings","Listings"],["tasks","Tasks"],["contacts","Contacts"],["provisors","Provisors"],["newsletter","Newsletter"]];
   return `
@@ -475,6 +598,10 @@ function renderTopbar(){
     <nav class="tabs">
       ${tabs.map(([key,label])=>`<button data-nav="${key}" class="${view===key?'active':''}">${label}</button>`).join("")}
     </nav>
+    <div style="display:flex;gap:8px;align-items:center">
+      <button class="btn small ${view==='settings'?'primary':'ghost'}" data-nav="settings">⚙ ${authEmail||'Account'}</button>
+      <button class="btn small ghost" id="btn-logout">Log out</button>
+    </div>
   </div>`;
 }
 
@@ -486,13 +613,16 @@ function renderView(){
   if(view==="listings") return renderListings();
   if(view==="provisors") return renderProvisors();
   if(view==="newsletter") return renderNewsletterList();
+  if(view==="settings") return renderAccountSettings();
   return "";
 }
 
 /* ---------------- DASHBOARD ---------------- */
 function renderDashboard(){
   const openLeads = state.leads.filter(l=>!l.stage.startsWith("Closed"));
-  const openTasks = state.leads.flatMap(l=>l.tasks.filter(t=>t.status==="open").map(t=>({...t, leadName:l.name, leadId:l.id})));
+  const openTasks = state.tasks
+    .filter(t=>t.recordType==="lead" && t.status==="open")
+    .map(t=>({...t, leadName: t.leadName || (state.leads.find(l=>l.id===t.recordId)||{}).name || "—", leadId: t.recordId}));
   openTasks.sort((a,b)=> (a.due||"").localeCompare(b.due||""));
 
   const goneQuiet = openLeads.filter(l=>{
@@ -592,12 +722,12 @@ function renderPipeline(){
           <div class="col-head"><span>${stage}</span><span>${inStage.length}</span></div>
           <div class="col-body" data-stage-drop="${stage}">
             ${inStage.map(l=>{
-              const openTasks = l.tasks.filter(t=>t.status==="open");
+              const openTaskCount = leadOpenTaskCount(l.id);
               return `
               <div class="card ${l.type}" data-drag-lead="${l.id}" data-open-lead="${l.id}">
                 <div class="nm">${l.name}</div>
                 <div class="meta">${l.listingRef ? l.listingRef.slice(0,42) : (l.source||'—')}</div>
-                ${openTasks.length ? `<div class="tsk">${openTasks.length} open task${openTasks.length>1?'s':''}</div>` : ""}
+                ${openTaskCount ? `<div class="tsk">${openTaskCount} open task${openTaskCount>1?'s':''}</div>` : ""}
               </div>`;
             }).join("")}
           </div>
@@ -714,7 +844,10 @@ function renderAddLeadModal(){
 
 /* ---------------- TASKS VIEW ---------------- */
 function renderTasksView(){
-  const all = state.leads.flatMap(l=>l.tasks.map(t=>({...t, leadName:l.name, leadId:l.id, leadType:l.type})));
+  const all = state.tasks.filter(t=>t.recordType==="lead").map(t=>{
+    const lead = state.leads.find(l=>l.id===t.recordId) || {};
+    return {...t, leadName: t.leadName || lead.name || "—", leadId: t.recordId, leadType: lead.type};
+  });
   all.sort((a,b)=> (a.status==='done'?1:0)-(b.status==='done'?1:0) || (a.due||"").localeCompare(b.due||""));
   return `
     <h1 class="page-title">Tasks</h1>
@@ -822,7 +955,7 @@ function renderListingDrawer(){
 
       <div class="section-label">Buyer Leads on This Listing (${buyers.length})</div>
       ${buyers.length ? buyers.map(b=>{
-        const openTaskCount = (b.tasks||[]).filter(t=>t.status==="open").length;
+        const openTaskCount = leadOpenTaskCount(b.id);
         return `
         <div class="row-item" style="align-items:center">
           <span data-open-lead="${b.id}" style="cursor:pointer">
@@ -963,9 +1096,9 @@ function renderProvisors(){
               <td>${renderAvatar(p.photoDataUrl, p.email)}</td>
               <td>${p.name}${p.tags.map(t=>`<div class="tagchip">${t}</div>`).join("")}</td>
               <td>${p.specialty}</td>
-              <td>${p.troikas.length}</td>
-              <td>${p.connections.length}</td>
-              <td>${p.comments.length}</td>
+              <td>${p.troikaCount}</td>
+              <td>${p.connectionCount}</td>
+              <td>${p.commentCount}</td>
             </tr>`).join("") || `<tr><td colspan="6"><div class="empty">No provisors yet.</div></td></tr>`}
         </tbody>
       </table>
@@ -1111,10 +1244,10 @@ function renderNewsletterList(){
 
 function recipientOptions(){
   const groups = [
-    {key:"all-buyers", label:"All active buyer leads"},
-    {key:"all-sellers", label:"All active seller leads"},
-    {key:"all-contacts", label:"All contacts"},
-    {key:"all-provisors", label:"All provisors"},
+    {key:"all_buyers", label:"All active buyer leads"},
+    {key:"all_sellers", label:"All active seller leads"},
+    {key:"all_contacts", label:"All contacts"},
+    {key:"all_provisors", label:"All provisors"},
   ];
   return groups;
 }
@@ -1142,27 +1275,100 @@ function renderNewsletterModal(){
 
 /* ---------------- EVENTS ---------------- */
 function bindEvents(){
-  root.querySelectorAll("[data-nav]").forEach(el=> el.onclick = ()=>{ view = el.dataset.nav; render(); });
+  root.querySelectorAll("[data-nav]").forEach(el=> el.onclick = ()=>{ view = el.dataset.nav; settingsError=null; settingsSaved=false; render(); });
+
+  const setupBtn = root.querySelector("#btn-setup-submit");
+  if(setupBtn) setupBtn.onclick = async ()=>{
+    const email = root.querySelector("#setup-email").value.trim();
+    const password = root.querySelector("#setup-password").value;
+    const confirm = root.querySelector("#setup-password-confirm").value;
+    authError = null;
+    if(password !== confirm){ authError = "Passwords don't match."; render(); return; }
+    try{
+      const result = await apiPost("/auth/setup", { email, password });
+      authEmail = result.email; authed = true; hasAccount = true;
+      render();
+      await loadState(); initDragEngine(); render();
+    }catch(e){ authError = e.message; render(); }
+  };
+
+  const loginBtn = root.querySelector("#btn-login-submit");
+  if(loginBtn) loginBtn.onclick = async ()=>{
+    const email = root.querySelector("#login-email").value.trim();
+    const password = root.querySelector("#login-password").value;
+    authError = null;
+    try{
+      const result = await apiPost("/auth/login", { email, password });
+      authEmail = result.email; authed = true;
+      render();
+      await loadState(); initDragEngine(); render();
+    }catch(e){ authError = e.message; render(); }
+  };
+
+  const logoutBtn = root.querySelector("#btn-logout");
+  if(logoutBtn) logoutBtn.onclick = async ()=>{
+    try{ await apiPost("/auth/logout"); }catch(e){}
+    authed = false; authEmail = null; view = "dashboard";
+    state = { leads:[], listings:[], contacts:[], provisors:[], newsletters:[], tasks:[], loaded:false };
+    render();
+  };
+
+  const settingsSaveBtn = root.querySelector("#btn-settings-save");
+  if(settingsSaveBtn) settingsSaveBtn.onclick = async ()=>{
+    const newEmailField = root.querySelector("#settings-email").value.trim();
+    const newPassword = root.querySelector("#settings-new-password").value;
+    const newPasswordConfirm = root.querySelector("#settings-new-password-confirm").value;
+    const currentPassword = root.querySelector("#settings-current-password").value;
+    settingsError = null; settingsSaved = false;
+    if(!currentPassword){ settingsError = "Enter your current password to save changes."; render(); return; }
+    if(newPassword && newPassword !== newPasswordConfirm){ settingsError = "New passwords don't match."; render(); return; }
+    const payload = { currentPassword };
+    if(newEmailField && newEmailField.toLowerCase() !== (authEmail||"").toLowerCase()) payload.newEmail = newEmailField;
+    if(newPassword) payload.newPassword = newPassword;
+    if(!payload.newEmail && !payload.newPassword){ settingsError = "Nothing to change."; render(); return; }
+    try{
+      const result = await apiPatch("/auth/me", payload);
+      authEmail = result.email; settingsSaved = true;
+      render();
+    }catch(e){ settingsError = e.message; render(); }
+  };
 
   root.querySelectorAll("[data-pipe]").forEach(el=> el.onclick = ()=>{ pipelineType = el.dataset.pipe; render(); });
 
   const buyerViewSelect = root.querySelector("#buyer-view-filter");
   if(buyerViewSelect) buyerViewSelect.onchange = ()=>{ buyerViewFilter = buyerViewSelect.value; render(); };
 
-  root.querySelectorAll("[data-open-lead]").forEach(el=> el.onclick = (e)=>{
+  root.querySelectorAll("[data-open-lead]").forEach(el=> el.onclick = async (e)=>{
     e.preventDefault();
     if(suppressNextClick){ suppressNextClick = false; return; }
-    openContactId=null; openProvisorId=null; openListingId=null; openLeadId = el.dataset.openLead; render();
+    const id = el.dataset.openLead;
+    openContactId=null; openProvisorId=null; openListingId=null;
+    try{ await loadLeadDetail(id); }catch(e){ return; }
+    openLeadId = id; render();
   });
-  root.querySelectorAll("[data-open-contact]").forEach(el=> el.onclick = ()=>{ openContactId = el.dataset.openContact; render(); });
-  root.querySelectorAll("[data-open-provisor]").forEach(el=> el.onclick = ()=>{ openProvisorId = el.dataset.openProvisor; render(); });
+  root.querySelectorAll("[data-open-contact]").forEach(el=> el.onclick = async ()=>{
+    const id = el.dataset.openContact;
+    try{ await loadContactDetail(id); }catch(e){ return; }
+    openContactId = id; render();
+  });
+  root.querySelectorAll("[data-open-provisor]").forEach(el=> el.onclick = async ()=>{
+    const id = el.dataset.openProvisor;
+    try{ await loadProvisorDetail(id); }catch(e){ return; }
+    openProvisorId = id; render();
+  });
   root.querySelectorAll("[data-quick-stage]").forEach(el=> el.onchange = async ()=>{
     const l = state.leads.find(x=>x.id===el.dataset.quickStage);
-    l.stage = el.value;
-    await saveState(); render();
+    const stage = el.value;
+    await apiPatch(`/leads/${l.id}/stage`, { stage, outcome: l.outcome });
+    l.stage = stage;
+    render();
   });
 
-  root.querySelectorAll("[data-open-listing]").forEach(el=> el.onclick = ()=>{ openListingId = el.dataset.openListing; render(); });
+  root.querySelectorAll("[data-open-listing]").forEach(el=> el.onclick = async ()=>{
+    const id = el.dataset.openListing;
+    try{ await loadListingDetail(id); }catch(e){ return; }
+    openListingId = id; render();
+  });
 
   const btnAddLead = root.querySelector("#btn-add-lead");
   if(btnAddLead) btnAddLead.onclick = ()=>{ showAddLead = true; render(); };
@@ -1177,7 +1383,7 @@ function bindEvents(){
   const btnAddProvisor = root.querySelector("#btn-add-provisor");
   if(btnAddProvisor) btnAddProvisor.onclick = ()=>{ showAddProvisor = true; render(); };
   const btnNewNewsletter = root.querySelector("#btn-new-newsletter");
-  if(btnNewNewsletter) btnNewNewsletter.onclick = ()=>{ showNewsletterEditor = {id:null, subject:"", body:"", recipientKey:"all-buyers", status:"draft"}; render(); };
+  if(btnNewNewsletter) btnNewNewsletter.onclick = ()=>{ showNewsletterEditor = {id:null, subject:"", body:"", recipientKey:"all_buyers", status:"draft"}; render(); };
 
   root.querySelectorAll("[data-edit-newsletter]").forEach(el=> el.onclick = ()=>{
     const n = state.newsletters.find(x=>x.id===el.dataset.editNewsletter);
@@ -1194,35 +1400,40 @@ function bindEvents(){
     const name = root.querySelector("#f-name").value.trim();
     if(!name) return;
     const listingIdField = root.querySelector("#f-listing-id");
-    state.leads.push({
-      id: uid(), name,
-      email: root.querySelector("#f-email").value.trim(),
-      phone: root.querySelector("#f-phone").value.trim(),
-      type: pipelineType,
-      source: root.querySelector("#f-source").value,
-      listingRef: root.querySelector("#f-listing").value.trim(),
-      listingId: listingIdField ? listingIdField.value : "",
-      stage: "New Lead", owner: "Max", lastContactAt: today(), createdAt: today(),
-      notes: [], tasks: [], documents: []
-    });
+    let created;
+    try{
+      created = await apiPost("/leads", {
+        name,
+        email: root.querySelector("#f-email").value.trim(),
+        phone: root.querySelector("#f-phone").value.trim(),
+        type: pipelineType,
+        source: root.querySelector("#f-source").value,
+        listing_ref: root.querySelector("#f-listing").value.trim(),
+        listing_id: listingIdField ? (listingIdField.value || null) : null
+      });
+    }catch(e){ return; }
+    state.leads.push(normalizeLead(created));
     showAddLead = false;
-    await saveState(); render();
+    render();
   };
 
   const saveListingBtn = root.querySelector("#btn-save-listing");
   if(saveListingBtn) saveListingBtn.onclick = async ()=>{
     const businessName = root.querySelector("#li-name").value.trim();
     if(!businessName) return;
-    state.listings.push({
-      id: uid(), businessName,
-      industry: root.querySelector("#li-industry").value.trim(),
-      askingPrice: root.querySelector("#li-price").value.trim(),
-      status: root.querySelector("#li-status").value,
-      notes: root.querySelector("#li-notes").value.trim(),
-      sellerLeadId: "", createdAt: today(), links: []
-    });
+    let created;
+    try{
+      created = await apiPost("/listings", {
+        business_name: businessName,
+        industry: root.querySelector("#li-industry").value.trim(),
+        asking_price: root.querySelector("#li-price").value.trim(),
+        status: root.querySelector("#li-status").value,
+        notes: root.querySelector("#li-notes").value.trim()
+      });
+    }catch(e){ return; }
+    state.listings.push(normalizeListing(created));
     showAddListing = false;
-    await saveState(); render();
+    render();
   };
 
   const saveContactBtn = root.querySelector("#btn-save-contact");
@@ -1231,17 +1442,19 @@ function bindEvents(){
     if(!name) return;
     const details = root.querySelector("#c-details").value.trim();
     const fileInput = root.querySelector("#c-photo");
-    const finish = (photoDataUrl)=>{
-      state.contacts.push({
-        id: uid(), name, email: root.querySelector("#c-email").value.trim(),
-        phone: root.querySelector("#c-phone").value.trim(), details,
-        linkedin: root.querySelector("#c-linkedin").value.trim(),
-        category: autoCategory(details), tags:[autoCategory(details)],
-        photoDataUrl: photoDataUrl||"", createdAt: today(),
-        notes: [], tasks: []
-      });
+    const finish = async (photoDataUrl)=>{
+      let created;
+      try{
+        created = await apiPost("/contacts", {
+          name, email: root.querySelector("#c-email").value.trim(),
+          phone: root.querySelector("#c-phone").value.trim(), details,
+          linkedin: root.querySelector("#c-linkedin").value.trim(),
+          category: autoCategory(details), photo_url: photoDataUrl || ""
+        });
+      }catch(e){ return; }
+      state.contacts.push(normalizeContact(created));
       showAddContact = false;
-      saveState().then(render);
+      render();
     };
     if(fileInput.files && fileInput.files[0]){
       const reader = new FileReader();
@@ -1256,14 +1469,18 @@ function bindEvents(){
     if(!name) return;
     const specialty = root.querySelector("#p-specialty").value;
     const fileInput = root.querySelector("#p-photo");
-    const finish = (photoDataUrl)=>{
-      state.provisors.push({
-        id: uid(), name, email: root.querySelector("#p-email").value.trim(),
-        phone: root.querySelector("#p-phone").value.trim(), specialty, tags:[specialty],
-        photoDataUrl: photoDataUrl||"", troikas:[], connections:[], comments:[]
-      });
+    const finish = async (photoDataUrl)=>{
+      let created;
+      try{
+        created = await apiPost("/provisors", {
+          name, email: root.querySelector("#p-email").value.trim(),
+          phone: root.querySelector("#p-phone").value.trim(), specialty,
+          photo_url: photoDataUrl || "", tags: [specialty]
+        });
+      }catch(e){ return; }
+      state.provisors.push(normalizeProvisor(created));
       showAddProvisor = false;
-      saveState().then(render);
+      render();
     };
     if(fileInput.files && fileInput.files[0]){
       const reader = new FileReader();
@@ -1275,26 +1492,32 @@ function bindEvents(){
   const stageSelect = root.querySelector("#stage-select");
   if(stageSelect) stageSelect.onchange = async ()=>{
     const l = state.leads.find(x=>x.id===openLeadId);
-    l.stage = stageSelect.value;
-    await saveState(); render();
+    const stage = stageSelect.value;
+    try{ await apiPatch(`/leads/${l.id}/stage`, { stage, outcome: l.outcome }); }catch(e){ return; }
+    l.stage = stage; render();
   };
 
   root.querySelectorAll("[data-save-description]").forEach(el=> el.onclick = async ()=>{
     const l = state.leads.find(x=>x.id===el.dataset.saveDescription);
-    l.description = root.querySelector("#lead-description").value.trim();
-    await saveState(); render();
+    const description = root.querySelector("#lead-description").value.trim();
+    try{ await apiPatch(`/leads/${l.id}/description`, { description }); }catch(e){ return; }
+    l.description = description; render();
   });
 
   const listingStatusSelect = root.querySelector("#listing-status-select");
   if(listingStatusSelect) listingStatusSelect.onchange = async ()=>{
     const li = state.listings.find(x=>x.id===openListingId);
-    li.status = listingStatusSelect.value;
-    await saveState(); render();
+    const status = listingStatusSelect.value;
+    try{ await apiPatch(`/listings/${li.id}/status`, { status }); }catch(e){ return; }
+    li.status = status; render();
   };
   root.querySelectorAll("[data-delete-listing]").forEach(el=> el.onclick = async ()=>{
-    state.listings = state.listings.filter(x=>x.id!==el.dataset.deleteListing);
+    const id = el.dataset.deleteListing;
+    try{ await apiDelete(`/listings/${id}`); }catch(e){ return; }
+    state.listings = state.listings.filter(x=>x.id!==id);
+    state.leads.forEach(l=>{ if(l.listingId===id) l.listingId=""; });
     openListingId = null;
-    await saveState(); render();
+    render();
   });
 
   root.querySelectorAll("[data-add-link]").forEach(el=> el.onclick = async ()=>{
@@ -1303,15 +1526,18 @@ function bindEvents(){
     if(!url) return;
     if(!/^https?:\/\//i.test(url)) url = "https://" + url;
     const label = root.querySelector("#new-link-label").value.trim();
+    let created;
+    try{ created = await apiPost(`/listings/${li.id}/links`, { label: label || "Link", url }); }catch(e){ return; }
     if(!li.links) li.links = [];
-    li.links.push({ id: uid(), label: label || "Link", url });
-    await saveState(); render();
+    li.links.push({ id: created.id, label: created.label, url: created.url });
+    render();
   });
   root.querySelectorAll("[data-delete-link]").forEach(el=> el.onclick = async ()=>{
     const [listingId, linkId] = el.dataset.deleteLink.split(":");
+    try{ await apiDelete(`/listings/${listingId}/links/${linkId}`); }catch(e){ return; }
     const li = state.listings.find(x=>x.id===listingId);
     li.links = (li.links||[]).filter(lk=>lk.id!==linkId);
-    await saveState(); render();
+    render();
   });
 
   const importFileInput = root.querySelector("#import-file");
@@ -1346,46 +1572,64 @@ function bindEvents(){
   const confirmImportBtn = root.querySelector("#btn-confirm-import");
   if(confirmImportBtn) confirmImportBtn.onclick = async ()=>{
     const module = importState.module;
-    const built = importState.rows
+    const rows = importState.rows
       .map(r=> buildRecordFromRow(module, r, importState.mapping))
       .filter(rec=> recordHasAName(module, rec));
+    if(!rows.length){ importState = null; render(); return; }
 
-    if(module==="leads-buyer" || module==="leads-seller") state.leads.push(...built);
-    else if(module==="listings") state.listings.push(...built);
-    else if(module==="contacts") state.contacts.push(...built);
-    else if(module==="provisors") state.provisors.push(...built);
+    let result;
+    try{
+      if(module==="leads-buyer" || module==="leads-seller"){
+        result = await apiPost("/import/leads", { rows, type: module==="leads-buyer" ? "buyer" : "seller" });
+        state.leads.push(...result.records.map(normalizeLead));
+      } else if(module==="listings"){
+        result = await apiPost("/import/listings", { rows });
+        state.listings.push(...result.records.map(normalizeListing));
+      } else if(module==="contacts"){
+        result = await apiPost("/import/contacts", { rows });
+        state.contacts.push(...result.records.map(normalizeContact));
+      } else if(module==="provisors"){
+        result = await apiPost("/import/provisors", { rows });
+        state.provisors.push(...result.records.map(normalizeProvisor));
+      }
+    }catch(e){ return; }
 
     importState = null;
-    await saveState(); render();
+    render();
   };
 
   root.querySelectorAll("[data-close-won]").forEach(el=> el.onclick = async ()=>{
     const l = state.leads.find(x=>x.id===el.dataset.closeWon);
-    l.stage = "Closed"; l.outcome = "won";
-    await saveState(); render();
+    try{ await apiPatch(`/leads/${l.id}/stage`, { stage: "Closed", outcome: "won" }); }catch(e){ return; }
+    l.stage = "Closed"; l.outcome = "won"; render();
   });
   root.querySelectorAll("[data-close-lost]").forEach(el=> el.onclick = async ()=>{
     const l = state.leads.find(x=>x.id===el.dataset.closeLost);
-    l.stage = "Closed"; l.outcome = "lost";
-    await saveState(); render();
+    try{ await apiPatch(`/leads/${l.id}/stage`, { stage: "Closed", outcome: "lost" }); }catch(e){ return; }
+    l.stage = "Closed"; l.outcome = "lost"; render();
   });
   root.querySelectorAll("[data-delete-lead]").forEach(el=> el.onclick = async ()=>{
-    state.leads = state.leads.filter(x=>x.id!==el.dataset.deleteLead);
-    openLeadId = null;
-    await saveState(); render();
+    const id = el.dataset.deleteLead;
+    try{ await apiDelete(`/leads/${id}`); }catch(e){ return; }
+    state.leads = state.leads.filter(x=>x.id!==id);
+    state.tasks = state.tasks.filter(t=>!(t.recordType==="lead" && t.recordId===id));
+    openLeadId = null; render();
   });
   root.querySelectorAll("[data-delete-contact]").forEach(el=> el.onclick = async ()=>{
-    state.contacts = state.contacts.filter(x=>x.id!==el.dataset.deleteContact);
-    openContactId = null;
-    await saveState(); render();
+    const id = el.dataset.deleteContact;
+    try{ await apiDelete(`/contacts/${id}`); }catch(e){ return; }
+    state.contacts = state.contacts.filter(x=>x.id!==id);
+    state.tasks = state.tasks.filter(t=>!(t.recordType==="contact" && t.recordId===id));
+    openContactId = null; render();
   });
 
   root.querySelectorAll("[data-save-linkedin]").forEach(el=> el.onclick = async ()=>{
     const c = state.contacts.find(x=>x.id===el.dataset.saveLinkedin);
     let url = root.querySelector("#contact-linkedin").value.trim();
     if(url && !/^https?:\/\//i.test(url)) url = "https://" + url;
-    c.linkedin = url;
-    await saveState(); render();
+    let updated;
+    try{ updated = await apiPatch(`/contacts/${c.id}/linkedin`, { linkedin: url }); }catch(e){ return; }
+    c.linkedin = updated.linkedin || ""; render();
   });
 
   root.querySelectorAll("[data-add-contact-task]").forEach(el=> el.onclick = async ()=>{
@@ -1393,43 +1637,55 @@ function bindEvents(){
     const title = root.querySelector("#new-contact-task-title").value.trim();
     const due = root.querySelector("#new-contact-task-due").value;
     if(!title) return;
+    let created;
+    try{ created = await apiPost("/tasks", { record_type:"contact", record_id:c.id, title, due_date: due||today(), assignee:"Max" }); }catch(e){ return; }
     if(!c.tasks) c.tasks = [];
-    c.tasks.push({id:uid(), title, due: due||today(), status:"open", assignee:"Max"});
-    await saveState(); render();
+    const nt = normalizeTask(created);
+    c.tasks.push(nt); state.tasks.push(nt);
+    render();
   });
   root.querySelectorAll("[data-toggle-contact-task]").forEach(el=> el.onclick = async ()=>{
     const [contactId, taskId] = el.dataset.toggleContactTask.split(":");
     const c = state.contacts.find(x=>x.id===contactId);
     const t = c.tasks.find(x=>x.id===taskId);
-    t.status = t.status==="done" ? "open" : "done";
-    await saveState(); render();
+    let updated;
+    try{ updated = await apiPatch(`/tasks/${taskId}/toggle`); }catch(e){ return; }
+    t.status = updated.status;
+    const st = state.tasks.find(x=>x.id===taskId); if(st) st.status = updated.status;
+    render();
   });
   root.querySelectorAll("[data-delete-contact-task]").forEach(el=> el.onclick = async ()=>{
     const [contactId, taskId] = el.dataset.deleteContactTask.split(":");
+    try{ await apiDelete(`/tasks/${taskId}`); }catch(e){ return; }
     const c = state.contacts.find(x=>x.id===contactId);
     c.tasks = c.tasks.filter(t=>t.id!==taskId);
-    await saveState(); render();
+    state.tasks = state.tasks.filter(t=>t.id!==taskId);
+    render();
   });
 
   root.querySelectorAll("[data-add-contact-note]").forEach(el=> el.onclick = async ()=>{
     const c = state.contacts.find(x=>x.id===el.dataset.addContactNote);
     const text = root.querySelector("#new-contact-note-text").value.trim();
     if(!text) return;
+    let created;
+    try{ created = await apiPost("/notes", { record_type:"contact", record_id:c.id, body:text, author:"Max" }); }catch(e){ return; }
     if(!c.notes) c.notes = [];
-    c.notes.push({id:uid(), text, author:"Max", ts: today()});
-    await saveState(); render();
+    c.notes.push(normalizeNote(created));
+    render();
   });
   root.querySelectorAll("[data-delete-contact-note]").forEach(el=> el.onclick = async ()=>{
     const [contactId, noteId] = el.dataset.deleteContactNote.split(":");
+    try{ await apiDelete(`/notes/${noteId}`); }catch(e){ return; }
     const c = state.contacts.find(x=>x.id===contactId);
     c.notes = c.notes.filter(n=>n.id!==noteId);
-    await saveState(); render();
+    render();
   });
 
   root.querySelectorAll("[data-delete-provisor]").forEach(el=> el.onclick = async ()=>{
-    state.provisors = state.provisors.filter(x=>x.id!==el.dataset.deleteProvisor);
-    openProvisorId = null;
-    await saveState(); render();
+    const id = el.dataset.deleteProvisor;
+    try{ await apiDelete(`/provisors/${id}`); }catch(e){ return; }
+    state.provisors = state.provisors.filter(x=>x.id!==id);
+    openProvisorId = null; render();
   });
 
   root.querySelectorAll("[data-add-task]").forEach(el=> el.onclick = async ()=>{
@@ -1437,28 +1693,35 @@ function bindEvents(){
     const title = root.querySelector("#new-task-title").value.trim();
     const due = root.querySelector("#new-task-due").value;
     if(!title) return;
-    l.tasks.push({id:uid(), title, due: due||today(), status:"open", assignee:"Max"});
-    await saveState(); render();
+    let created;
+    try{ created = await apiPost("/tasks", { record_type:"lead", record_id:l.id, title, due_date: due||today(), assignee:"Max" }); }catch(e){ return; }
+    const nt = normalizeTask(created);
+    l.tasks.push(nt); state.tasks.push(nt);
+    render();
   });
   root.querySelectorAll("[data-toggle-task]").forEach(el=> el.onclick = async ()=>{
     const [leadId, taskId] = el.dataset.toggleTask.split(":");
+    let updated;
+    try{ updated = await apiPatch(`/tasks/${taskId}/toggle`); }catch(e){ return; }
+    const st = state.tasks.find(x=>x.id===taskId); if(st) st.status = updated.status;
     const l = state.leads.find(x=>x.id===leadId);
-    const t = l.tasks.find(x=>x.id===taskId);
-    t.status = t.status==="done" ? "open" : "done";
-    await saveState(); render();
+    if(l){ const t = l.tasks.find(x=>x.id===taskId); if(t) t.status = updated.status; }
+    render();
   });
   root.querySelectorAll("[data-add-note]").forEach(el=> el.onclick = async ()=>{
     const l = state.leads.find(x=>x.id===el.dataset.addNote);
     const text = root.querySelector("#new-note-text").value.trim();
     if(!text) return;
-    l.notes.push({id:uid(), text, author:"Max", ts: today()});
+    let created;
+    try{ created = await apiPost("/notes", { record_type:"lead", record_id:l.id, body:text, author:"Max" }); }catch(e){ return; }
+    l.notes.push(normalizeNote(created));
     l.lastContactAt = today();
-    await saveState(); render();
+    render();
   });
   root.querySelectorAll("[data-set-contact]").forEach(el=> el.onclick = async ()=>{
     const l = state.leads.find(x=>x.id===el.dataset.setContact);
-    l.lastContactAt = today();
-    await saveState(); render();
+    try{ await apiPatch(`/leads/${l.id}/contact`); }catch(e){ return; }
+    l.lastContactAt = today(); render();
   });
 
   root.querySelectorAll("[data-add-troika]").forEach(el=> el.onclick = async ()=>{
@@ -1466,80 +1729,111 @@ function bindEvents(){
     const notes = root.querySelector("#new-troika-notes").value.trim();
     const date = root.querySelector("#new-troika-date").value || today();
     if(!notes) return;
-    p.troikas.push({id:uid(), date, notes});
-    await saveState(); render();
+    let created;
+    try{ created = await apiPost(`/provisors/${p.id}/troikas`, { event_date: date, notes }); }catch(e){ return; }
+    p.troikas.push({ id: created.id, date: d(created.event_date), notes: created.notes });
+    p.troikaCount++;
+    render();
   });
   root.querySelectorAll("[data-add-conn]").forEach(el=> el.onclick = async ()=>{
     const p = state.provisors.find(x=>x.id===el.dataset.addConn);
     const note = root.querySelector("#new-conn-note").value.trim();
     const direction = root.querySelector("#new-conn-dir").value;
     if(!note) return;
-    p.connections.push({id:uid(), date: today(), direction, note, linkedLeadId:""});
-    await saveState(); render();
+    let created;
+    try{ created = await apiPost(`/provisors/${p.id}/connections`, { direction, note, linked_lead_id: null }); }catch(e){ return; }
+    p.connections.push({ id: created.id, date: d(created.event_date), direction: created.direction, note: created.note, linkedLeadId: created.linked_lead_id || "" });
+    p.connectionCount++;
+    render();
   });
   root.querySelectorAll("[data-add-provisor-comment]").forEach(el=> el.onclick = async ()=>{
     const p = state.provisors.find(x=>x.id===el.dataset.addProvisorComment);
     const text = root.querySelector("#new-provisor-comment").value.trim();
     if(!text) return;
-    p.comments.push({id:uid(), text, author:"Max", ts: today()});
-    await saveState(); render();
+    let created;
+    try{ created = await apiPost("/notes", { record_type:"provisor", record_id:p.id, body:text, author:"Max" }); }catch(e){ return; }
+    p.comments.push(normalizeNote(created));
+    p.commentCount++;
+    render();
   });
 
   root.querySelectorAll("[data-delete-task]").forEach(el=> el.onclick = async ()=>{
     const [leadId, taskId] = el.dataset.deleteTask.split(":");
+    try{ await apiDelete(`/tasks/${taskId}`); }catch(e){ return; }
+    state.tasks = state.tasks.filter(t=>t.id!==taskId);
     const l = state.leads.find(x=>x.id===leadId);
-    l.tasks = l.tasks.filter(t=>t.id!==taskId);
-    await saveState(); render();
+    if(l) l.tasks = l.tasks.filter(t=>t.id!==taskId);
+    render();
   });
   root.querySelectorAll("[data-delete-note]").forEach(el=> el.onclick = async ()=>{
     const [leadId, noteId] = el.dataset.deleteNote.split(":");
+    try{ await apiDelete(`/notes/${noteId}`); }catch(e){ return; }
     const l = state.leads.find(x=>x.id===leadId);
     l.notes = l.notes.filter(n=>n.id!==noteId);
-    await saveState(); render();
+    render();
   });
   root.querySelectorAll("[data-delete-troika]").forEach(el=> el.onclick = async ()=>{
     const [provisorId, troikaId] = el.dataset.deleteTroika.split(":");
+    try{ await apiDelete(`/provisors/${provisorId}/troikas/${troikaId}`); }catch(e){ return; }
     const p = state.provisors.find(x=>x.id===provisorId);
     p.troikas = p.troikas.filter(t=>t.id!==troikaId);
-    await saveState(); render();
+    p.troikaCount--;
+    render();
   });
   root.querySelectorAll("[data-delete-conn]").forEach(el=> el.onclick = async ()=>{
     const [provisorId, connId] = el.dataset.deleteConn.split(":");
+    try{ await apiDelete(`/provisors/${provisorId}/connections/${connId}`); }catch(e){ return; }
     const p = state.provisors.find(x=>x.id===provisorId);
     p.connections = p.connections.filter(c=>c.id!==connId);
-    await saveState(); render();
+    p.connectionCount--;
+    render();
   });
   root.querySelectorAll("[data-delete-provisor-comment]").forEach(el=> el.onclick = async ()=>{
     const [provisorId, commentId] = el.dataset.deleteProvisorComment.split(":");
+    try{ await apiDelete(`/notes/${commentId}`); }catch(e){ return; }
     const p = state.provisors.find(x=>x.id===provisorId);
     p.comments = p.comments.filter(c=>c.id!==commentId);
-    await saveState(); render();
+    p.commentCount--;
+    render();
   });
   root.querySelectorAll("[data-delete-newsletter]").forEach(el=> el.onclick = async ()=>{
-    state.newsletters = state.newsletters.filter(n=>n.id!==el.dataset.deleteNewsletter);
-    await saveState(); render();
+    const id = el.dataset.deleteNewsletter;
+    try{ await apiDelete(`/newsletters/${id}`); }catch(e){ return; }
+    state.newsletters = state.newsletters.filter(n=>n.id!==id);
+    render();
   });
 
   const saveNlDraft = root.querySelector("#btn-save-newsletter-draft");
   if(saveNlDraft) saveNlDraft.onclick = async ()=> persistNewsletter("draft");
   const sendNl = root.querySelector("#btn-send-newsletter");
-  if(sendNl) sendNl.onclick = async ()=> persistNewsletter("sent (simulated)");
+  if(sendNl) sendNl.onclick = async ()=> persistNewsletter("send");
 }
 
-async function persistNewsletter(status){
+async function persistNewsletter(action){
   const subject = root.querySelector("#n-subject").value.trim();
   const body = root.querySelector("#n-body").value.trim();
   const recipientKey = root.querySelector("#n-recipients").value;
-  const recipientLabel = recipientOptions().find(g=>g.key===recipientKey).label;
   const n = showNewsletterEditor;
-  if(n.id){
-    const existing = state.newsletters.find(x=>x.id===n.id);
-    Object.assign(existing, {subject, body, recipientKey, recipientLabel, status});
-  } else {
-    state.newsletters.push({id: uid(), subject, body, recipientKey, recipientLabel, status, createdAt: today()});
+
+  if(action==="send" && !confirm("This sends a real email, right now, to everyone in that recipient group using your connected Gmail account. Continue?")){
+    return;
   }
+
+  let id = n.id;
+  try{
+    if(id){
+      await apiPatch(`/newsletters/${id}`, { subject, body, recipient_group: recipientKey });
+    } else {
+      const created = await apiPost("/newsletters", { subject, body, recipient_group: recipientKey });
+      id = created.id;
+    }
+    if(action==="send") await apiPost(`/newsletters/${id}/send`, {});
+  }catch(e){ return; }
+
+  const rows = await apiGet("/newsletters");
+  state.newsletters = rows.map(normalizeNewsletter);
   showNewsletterEditor = null;
-  await saveState(); render();
+  render();
 }
 
 function closeAll(){
@@ -1550,7 +1844,10 @@ function closeAll(){
 }
 
 /* ---------------- INIT ---------------- */
+let dragEngineStarted = false;
 function initDragEngine(){
+  if(dragEngineStarted) return; // avoid double-binding if the user logs out and back in
+  dragEngineStarted = true;
   document.addEventListener("pointerdown", (e)=>{
     const card = e.target.closest("[data-drag-lead]");
     if(!card) return;
@@ -1598,8 +1895,10 @@ function initDragEngine(){
       const l = state.leads.find(x=>x.id===leadId);
       const newStage = currentCol.dataset.stageDrop;
       if(l && newStage && l.stage !== newStage){
-        l.stage = newStage;
-        await saveState();
+        try{
+          await apiPatch(`/leads/${l.id}/stage`, { stage: newStage, outcome: l.outcome });
+          l.stage = newStage;
+        }catch(e){}
       }
       render();
     }
@@ -1607,7 +1906,25 @@ function initDragEngine(){
   });
 }
 
-loadState().then(()=>{ initDragEngine(); render(); });
+async function boot(){
+  render(); // shows the "Loading…" placeholder while the auth check is in flight
+  try{
+    const status = await apiGet("/auth/status");
+    hasAccount = status.hasAccount;
+    if(hasAccount){
+      try{
+        const me = await apiGet("/auth/me");
+        authEmail = me.email; authed = true;
+      }catch(e){ authed = false; }
+    }
+  }catch(e){
+    console.error("Could not reach the server", e);
+  }
+  authChecked = true;
+  if(authed){ await loadState(); initDragEngine(); }
+  render();
+}
+boot();
 
 })();
 </script>

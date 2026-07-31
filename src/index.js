@@ -1,7 +1,10 @@
 require("dotenv").config();
 const express = require("express");
+const cookieParser = require("cookie-parser");
 const path = require("path");
 const apiRoutes = require("./routes/api");
+const authRoutes = require("./routes/auth");
+const { requireAuth } = require("./auth");
 const gmail = require("./integrations/gmail");
 const boldsign = require("./integrations/boldsign");
 const twilioIntegration = require("./integrations/twilio");
@@ -11,13 +14,18 @@ const scheduler = require("./services/reminderScheduler");
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true })); // Twilio posts form-encoded webhooks
+app.use(cookieParser());
 
 /* ---------- Static frontend ---------- */
 // Drop the DealWorld_2.0.html file (or a built frontend) into /public and it's served here.
+// The page itself is static and unprotected — it's just the shell; the login
+// screen inside it is what actually gates access, and every /api/* route
+// below (aside from /api/auth) requires a valid session before it returns data.
 app.use(express.static(path.join(__dirname, "..", "public")));
 
 /* ---------- API ---------- */
-app.use("/api", apiRoutes);
+app.use("/api/auth", authRoutes);
+app.use("/api", requireAuth, apiRoutes);
 
 /* ---------- Gmail OAuth (one time setup) ---------- */
 app.get("/auth/gmail", (req, res) => {

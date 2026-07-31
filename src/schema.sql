@@ -1,6 +1,16 @@
 -- DealWorld 2.0 schema
 -- Run once against your Postgres/Supabase database (see README for how).
 
+-- Single-user login. The app's login screen creates this row itself the first
+-- time it's opened (see POST /api/auth/setup) — there's no separate seed step.
+CREATE TABLE IF NOT EXISTS users (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  email         TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL,
+  created_at    TIMESTAMPTZ DEFAULT now(),
+  updated_at    TIMESTAMPTZ DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS leads (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name            TEXT NOT NULL,

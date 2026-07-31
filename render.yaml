@@ -1,0 +1,65 @@
+services:
+  - type: web
+    name: dealworld-backend
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 18.19.1
+      # Everything else (DATABASE_URL, JWT_SECRET, integration API keys, BASE_URL, etc.)
+      # is marked sync: false so Render prompts for it in the dashboard instead of
+      # reading it from this file — none of that belongs in git.
+      - key: PORT
+        value: 3000
+      - key: DATABASE_URL
+        sync: false
+      - key: BASE_URL
+        sync: false
+      - key: DEALWORLD_TIMEZONE
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_REDIRECT_URI
+        sync: false
+      - key: GOOGLE_REFRESH_TOKEN
+        sync: false
+      - key: GMAIL_SEND_AS_ADDRESS
+        sync: false
+      - key: BOLDSIGN_API_KEY
+        sync: false
+      - key: BOLDSIGN_NDA_TEMPLATE_ID
+        sync: false
+      - key: BOLDSIGN_MARKETING_AGREEMENT_TEMPLATE_ID
+        sync: false
+      - key: BOLDSIGN_APA_TEMPLATE_ID
+        sync: false
+      - key: BOLDSIGN_WEBHOOK_SECRET
+        sync: false
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_FROM_NUMBER
+        sync: false
+      - key: DROPCOWBOY_TEAM_ID
+        sync: false
+      - key: DROPCOWBOY_SECRET
+        sync: false
+      - key: DROPCOWBOY_BRAND_ID
+        sync: false
+      - key: CALENDLY_PERSONAL_ACCESS_TOKEN
+        sync: false
+      - key: CALENDLY_WEBHOOK_SIGNING_KEY
+        sync: false
+      - key: CALENDLY_LINK
+        sync: false
+      - key: FATHOM_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false

@@ -28,10 +28,10 @@ router.get("/leads/:id", async (req, res) => {
 });
 
 router.post("/leads", async (req, res) => {
-  const { name, email, phone, type, source, listing_ref } = req.body;
+  const { name, email, phone, type, source, listing_ref, listing_id } = req.body;
   const result = await query(
-    `INSERT INTO leads (name, email, phone, type, source, listing_ref) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-    [name, email, phone, type, source, listing_ref]
+    `INSERT INTO leads (name, email, phone, type, source, listing_ref, listing_id) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+    [name, email, phone, type, source, listing_ref, listing_id || null]
   );
   res.status(201).json(result.rows[0]);
 });
@@ -251,9 +251,24 @@ router.delete("/contacts/:id", async (req, res) => {
 /* ---------- Provisors ---------- */
 router.get("/provisors", async (req, res) => {
   const provisors = await query(
-    `SELECT p.*, c.name, c.email, c.phone, c.photo_url FROM provisors p JOIN contacts c ON c.id = p.contact_id`
+    `SELECT p.*, c.name, c.email, c.phone, c.photo_url,
+       (SELECT COUNT(*) FROM provisor_troikas t WHERE t.provisor_id = p.id) AS troika_count,
+       (SELECT COUNT(*) FROM provisor_connections pc WHERE pc.provisor_id = p.id) AS connection_count,
+       (SELECT COUNT(*) FROM notes n WHERE n.record_type = 'provisor' AND n.record_id = p.id) AS comment_count
+     FROM provisors p JOIN contacts c ON c.id = p.contact_id`
   );
   res.json(provisors.rows);
+});
+router.get("/provisors/:id", async (req, res) => {
+  const provisor = await query(
+    `SELECT p.*, c.name, c.email, c.phone, c.photo_url FROM provisors p JOIN contacts c ON c.id = p.contact_id WHERE p.id = $1`,
+    [req.params.id]
+  );
+  if (!provisor.rows.length) return res.status(404).json({ error: "not found" });
+  const troikas = await query("SELECT * FROM provisor_troikas WHERE provisor_id = $1 ORDER BY event_date", [req.params.id]);
+  const connections = await query("SELECT * FROM provisor_connections WHERE provisor_id = $1 ORDER BY event_date", [req.params.id]);
+  const comments = await query("SELECT * FROM notes WHERE record_type='provisor' AND record_id=$1 ORDER BY created_at", [req.params.id]);
+  res.json({ ...provisor.rows[0], troikas: troikas.rows, connections: connections.rows, comments: comments.rows });
 });
 router.post("/provisors", async (req, res) => {
   const { name, email, phone, photo_url, specialty, tags } = req.body;
@@ -265,7 +280,8 @@ router.post("/provisors", async (req, res) => {
     "INSERT INTO provisors (contact_id, specialty, tags) VALUES ($1,$2,$3) RETURNING *",
     [contact.rows[0].id, specialty, tags || []]
   );
-  res.status(201).json({ ...provisor.rows[0], ...contact.rows[0] });
+  // contact spread first so provisor's id (not the underlying contact's id) wins.
+  res.status(201).json({ ...contact.rows[0], ...provisor.rows[0] });
 });
 router.post("/provisors/:id/troikas", async (req, res) => {
   const { event_date, notes } = req.body;
@@ -312,6 +328,14 @@ router.post("/newsletters", async (req, res) => {
     [subject, body, recipient_group]
   );
   res.status(201).json(result.rows[0]);
+});
+router.patch("/newsletters/:id", async (req, res) => {
+  const { subject, body, recipient_group } = req.body;
+  const result = await query(
+    "UPDATE newsletters SET subject = $1, body = $2, recipient_group = $3 WHERE id = $4 RETURNING *",
+    [subject, body, recipient_group, req.params.id]
+  );
+  res.json(result.rows[0]);
 });
 router.delete("/newsletters/:id", async (req, res) => {
   await query("DELETE FROM newsletters WHERE id = $1", [req.params.id]);
@@ -363,13 +387,13 @@ router.post("/outreach/mass-voicemail", async (req, res) => {
 // The frontend parses the file and maps columns client side (see DealWorld_2.0.html),
 // then posts already-shaped rows here. Each endpoint mirrors that module's single-create route.
 router.post("/import/leads", async (req, res) => {
-  const { rows, type } = req.body; // rows: [{name,email,phone,source,listing_ref}], type: 'buyer'|'seller'
+  const { rows, type } = req.body; // rows: [{name,email,phone,source,listing_ref,description}], type: 'buyer'|'seller'
   const created = [];
   for (const r of rows) {
     if (!r.name) continue;
     const result = await query(
-      `INSERT INTO leads (name,email,phone,type,source,listing_ref) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-      [r.name, r.email, r.phone, type, r.source || "CSV/Excel import", r.listing_ref]
+      `INSERT INTO leads (name,email,phone,type,source,listing_ref,description) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+      [r.name, r.email, r.phone, type, r.source || "CSV/Excel import", r.listing_ref, r.description]
     );
     created.push(result.rows[0]);
   }
