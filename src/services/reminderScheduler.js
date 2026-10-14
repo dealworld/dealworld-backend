@@ -117,6 +117,7 @@ function start() {
   );
 
   console.log("DealWorld 2.0 scheduler started.");
+  console.log(`[reminders] REMINDER_EMAILS_ENABLED is ${reminderEmailsEnabled() ? "ON" : "OFF"}: NDA reminders and the gone quiet digest ${reminderEmailsEnabled() ? "will send" : "are disabled"}.`);
 }
 
 module.exports = { start, runNdaReminders, runGoneQuietDigest };
