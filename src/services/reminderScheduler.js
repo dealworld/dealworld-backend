@@ -4,6 +4,7 @@ const { pollInbox, sendEmail } = require("../integrations/gmail");
 const { sendSms } = require("../integrations/twilio");
 const { sendRinglessVoicemail } = require("../integrations/ringlessVoicemail");
 const { syncRecentMeetings } = require("../integrations/fathom");
+const { reminderEmailsEnabled, logSkippedReminder } = require("../reminderFlag");
 
 const NDA_REMINDER_DAYS = [3, 6, 9]; // email at day 3, text at day 6, RVM at day 9 since NDA sent
 const GONE_QUIET_BUYER_DAYS = 7;
@@ -33,6 +34,12 @@ async function runNdaReminders() {
     const remindersLoggedSoFar = parseInt(alreadySent.rows[0].count, 10);
 
     if (daysSinceSent >= NDA_REMINDER_DAYS[0] && remindersLoggedSoFar === 0) {
+      // Checked right before the send. Skipping it also holds back the text and
+      // voicemail steps, which only fire after this email has been logged.
+      if (!reminderEmailsEnabled()) {
+        logSkippedReminder(`NDA reminder email to lead ${lead.id}`);
+        continue;
+      }
       const body = `Hi ${lead.name}, just following up — the NDA for ${lead.listing_ref || "the listing"} is still waiting on your signature. Let me know if you have any questions.`;
       await sendEmail({ to: lead.email, subject: "NDA reminder — still waiting on your signature", body });
       await logReminder(lead.id, "NDA reminder (email)");
@@ -80,6 +87,10 @@ async function runGoneQuietDigest() {
   const lines = stale.rows.map(
     (r) => `- ${r.name} (${r.type}, ${r.stage}) — ${Math.floor(r.days_quiet)} days quiet`
   );
+  if (!reminderEmailsEnabled()) {
+    logSkippedReminder(`gone quiet digest (${stale.rows.length} leads)`);
+    return;
+  }
   const body = `Good morning. These leads have gone quiet and could use a touch:\n\n${lines.join("\n")}`;
   await sendEmail({
     to: process.env.GMAIL_SEND_AS_ADDRESS,
